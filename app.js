@@ -21,7 +21,7 @@
   else qs.push(db.from('orders').select('*').order('day',{ascending:false}).limit(1000));
   const results=await Promise.all(qs);menu=check(results[0]);settings=check(results[1]);
   if(profile.role==='parent'){children=check(results[2]);orders=check(results[3]);}else orders=check(results[2]);
-  $('#school').textContent=settings.school||'اطلب من البيت واستلم بسهولة';$('#who').textContent=user.email+' · '+({parent:'ولي أمر',canteen:'المقصف',admin:'الإدارة'}[profile.role]||'');show('app');render();
+  $('#school').textContent=settings.school||'اطلب من البيت واستلم بسهولة';$('#who').textContent=(user.email||user.phone||'حساب المستخدم')+' · '+({parent:'ولي أمر',canteen:'المقصف',admin:'الإدارة'}[profile.role]||'');show('app');render();
  }
  function render(){
   let tabs=profile.role==='parent'?[['new','طلب جديد'],['orders','تذاكري'],['children','أبنائي']]:profile.role==='canteen'?[['work','طلبات المقصف']]:[['work','الطلبات'],['manage','الأصناف'],['settings','الإعدادات']];
@@ -56,7 +56,14 @@
  case 'cancel':if(confirm('إلغاء هذا اليوم وإعادة قيمته التجريبية؟')){check(await db.rpc('cancel_order',{p_id:id}));await load();toast('أُلغي اليوم وأعيد الرصيد التجريبي');}break;
  case 'delivery':check(await db.rpc('set_delivery',{p_id:id,p_delivered:b.dataset.value==='true'}));await load();toast('تم تحديث حالة التسليم');break;
  }}
- async function submit(f){const x=new FormData(f);switch(f.id){case 'loginForm':check(await db.auth.signInWithPassword({email:String(x.get('email')).trim(),password:x.get('password')}));break;
+ let pendingPhone='';
+ function normalizePhone(input){let p=String(input).replace(/[٠-٩]/g,c=>String(c.charCodeAt(0)-1632)).replace(/[۰-۹]/g,c=>String(c.charCodeAt(0)-1776)).replace(/[\s().-]/g,'');if(/^\d{8}$/.test(p))p='+965'+p;else if(/^00\d+$/.test(p))p='+'+p.slice(2);if(!/^\+[1-9]\d{7,14}$/.test(p))throw Error('أدخل رقم هاتف صحيحًا مع مفتاح الدولة، مثل +965 ثم رقم الهاتف.');return p;}
+ function normalizeCode(input){const value=String(input).trim().replace(/[٠-٩]/g,c=>String(c.charCodeAt(0)-1632)).replace(/[۰-۹]/g,c=>String(c.charCodeAt(0)-1776));if(!/^\d{4,10}$/.test(value))throw Error('أدخل رمز التحقق الرقمي كاملًا.');return value;}
+ function setLoginMode(phone){$('#phoneLogin').hidden=!phone;$('#loginForm').hidden=phone;$('#phoneMode').classList.toggle('active',phone);$('#emailMode').classList.toggle('active',!phone);$('#phoneMode').setAttribute('aria-pressed',String(phone));$('#emailMode').setAttribute('aria-pressed',String(!phone));clearError();}
+ async function submit(f){const x=new FormData(f);switch(f.id){
+ case 'phoneForm':{const phone=normalizePhone(x.get('phone'));const channel=x.get('channel');if(!['sms','whatsapp'].includes(channel))throw Error('اختر طريقة استلام صحيحة.');check(await db.auth.signInWithOtp({phone,options:{channel}}));pendingPhone=phone;$('#phoneForm').hidden=true;$('#verifyForm').hidden=false;$('#phoneHint').textContent=channel==='whatsapp'?'أرسلنا طلب الرمز إلى واتساب. أدخل الرمز عند وصوله.':'أرسلنا طلب الرمز برسالة SMS. أدخل الرمز عند وصوله.';$('#phoneCode').focus();break;}
+ case 'verifyForm':{if(!pendingPhone)throw Error('اطلب رمز التحقق أولًا.');check(await db.auth.verifyOtp({phone:pendingPhone,token:normalizeCode(x.get('code')),type:'sms'}));break;}
+ case 'loginForm':check(await db.auth.signInWithPassword({email:String(x.get('email')).trim(),password:x.get('password')}));break;
  case 'childForm':{let data={name:String(x.get('name')).trim(),grade:Number(x.get('grade')),section:Number(x.get('section'))};if(!data.name)throw Error('أدخل اسم الطالب');if(f.dataset.id)check(await db.from('children').update(data).eq('id',f.dataset.id));else check(await db.from('children').insert({...data,parent_id:user.id}));close();await load();toast('حُفظ الطالب');break;}
  case 'itemForm':{let data={name:String(x.get('name')).trim(),category:String(x.get('category')).trim(),price:Number(x.get('price'))};if(!data.name||!data.category)throw Error('أكمل بيانات الصنف');if(f.dataset.id)check(await db.from('menu').update(data).eq('id',f.dataset.id));else check(await db.from('menu').insert(data));close();await load();toast('حُفظ الصنف');break;}
  case 'settingsForm':check(await db.from('settings').update({school:String(x.get('school')).trim(),week_discount:Number(x.get('week')),month_discount:Number(x.get('month'))}).eq('id',1));await load();toast('حُفظت الإعدادات');break;}}
@@ -64,6 +71,9 @@
  document.addEventListener('submit',async e=>{e.preventDefault();const b=e.target.querySelector('button[type=submit],button:not([type])');try{clearError();if(b)b.disabled=true;await submit(e.target)}catch(err){appError(err)}finally{if(b)b.disabled=false}});
  document.addEventListener('change',e=>{if(e.target.id==='child')selectedChild=e.target.value;if(e.target.id==='plan')selectedPlan=e.target.value;if(e.target.id==='start')selectedStart=e.target.value;if(e.target.id==='filterDate'){filterDate=e.target.value;renderOrders(true)}});
  document.addEventListener('input',e=>{if(e.target.id==='filterText'){filterText=e.target.value;const pos=e.target.selectionStart;renderOrders(true);$('#filterText').focus();$('#filterText').setSelectionRange(pos,pos)}});
+ $('#phoneMode').addEventListener('click',()=>setLoginMode(true));
+ $('#emailMode').addEventListener('click',()=>setLoginMode(false));
+ $('#changePhone').addEventListener('click',()=>{pendingPhone='';$('#verifyForm').hidden=true;$('#phoneForm').hidden=false;$('#phoneCode').value='';$('#phoneHint').textContent='يمكنك تعديل الرقم أو اختيار طريقة الإرسال. إذا طلبت رمزًا للتو فقد تحتاج إلى الانتظار قبل طلب رمز آخر.';clearError()});
  $('#signup').addEventListener('click',async()=>{try{clearError();const form=$('#loginForm');if(!form.reportValidity())return;const data=new FormData(form);const result=check(await db.auth.signUp({email:String(data.get('email')).trim(),password:data.get('password'),options:{emailRedirectTo:location.origin+location.pathname}}));toast(result.session?'تم إنشاء الحساب':'تحقق من بريدك لتأكيد الحساب، ثم سجّل الدخول.')}catch(e){appError(e)}});
  $('#logout').addEventListener('click',async()=>{try{check(await db.auth.signOut());user=null;cart={};show('auth')}catch(e){appError(e)}});
  $('#refresh').addEventListener('click',()=>load().then(()=>toast('تم التحديث')).catch(appError));
