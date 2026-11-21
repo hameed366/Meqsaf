@@ -6,6 +6,7 @@
  const grades=['الأول','الثاني','الثالث','الرابع','الخامس','السادس','السابع','الثامن','التاسع','العاشر','الحادي عشر','الثاني عشر'];
  const status = {active:'قيد التجهيز', delivered:'تم التسليم',cancelled:'ملغي'};
  let db, user, profile, menu=[], children=[], orders=[], settings={}, cart={}, view='new', filterDate=today(), filterText='', selectedChild='', selectedPlan='day', selectedStart=today();
+ let liveOwner=null, liveTimer=null, liveDebounce=null, liveChannel=null, liveGeneration=0, liveBusy=false, livePending=false;
  const config=window.MAQSAF_CONFIG||{};
  function fail(e){console.error(e); $('#error').textContent='تعذّر إكمال العملية: '+(e?.message||'تحقق من الاتصال والإعدادات وحاول مجددًا.');$('#error').hidden=false;}
  function clearError(){$('#error').hidden=true} function toast(m){const t=$('#toast');t.textContent=m;t.hidden=false;setTimeout(()=>t.hidden=true,3500)}
@@ -22,6 +23,43 @@
   const results=await Promise.all(qs);menu=check(results[0]);settings=check(results[1]);
   if(profile.role==='parent'){children=check(results[2]);orders=check(results[3]);}else orders=check(results[2]);
   $('#school').textContent=settings.school||'اطلب من البيت واستلم بسهولة';$('#who').textContent=user.email+' · '+({parent:'ولي أمر',canteen:'المقصف',admin:'الإدارة'}[profile.role]||'');show('app');render();
+  if(profile.role==='admin'||profile.role==='canteen')startStaffUpdates();else stopStaffUpdates();
+ }
+ function stopStaffUpdates(){
+  liveGeneration++;liveOwner=null;liveBusy=false;livePending=false;
+  if(liveTimer!==null)clearInterval(liveTimer);liveTimer=null;
+  if(liveDebounce!==null)clearTimeout(liveDebounce);liveDebounce=null;
+  if(liveChannel){try{db.removeChannel(liveChannel)}catch(e){console.warn('تعذر إغلاق تحديث الطلبات',e)}liveChannel=null;}
+ }
+ function queueStaffUpdate(){
+  if(liveDebounce!==null)clearTimeout(liveDebounce);
+  liveDebounce=setTimeout(()=>{liveDebounce=null;refreshStaffOrders()},250);
+ }
+ async function refreshStaffOrders(){
+  if(!liveOwner||!user||user.id!==liveOwner||document.hidden)return;
+  if(liveBusy){livePending=true;return}
+  const generation=liveGeneration,owner=liveOwner;liveBusy=true;
+  try{
+   const fresh=check(await db.from('orders').select('*').order('day',{ascending:false}).limit(1000));
+   if(generation!==liveGeneration||!user||user.id!==owner)return;
+   orders=fresh;
+   if(view==='work')renderStaffList();
+   const status=$('#liveStatus');if(status)status.textContent='تحديث الطلبات تلقائيًا';
+  }catch(e){
+   if(generation===liveGeneration){const status=$('#liveStatus');if(status)status.textContent='تعذر التحديث التلقائي؛ تحقق من الاتصال.';console.warn('تعذر تحديث الطلبات',e)}
+  }finally{
+   if(generation===liveGeneration){liveBusy=false;if(livePending){livePending=false;queueStaffUpdate()}}
+  }
+ }
+ function startStaffUpdates(){
+  if(!user||liveOwner===user.id)return;
+  stopStaffUpdates();liveOwner=user.id;
+  liveTimer=setInterval(refreshStaffOrders,10000);
+  try{
+   liveChannel=db.channel('canteen-orders-'+user.id)
+    .on('postgres_changes',{event:'*',schema:'public',table:'orders'},queueStaffUpdate)
+    .subscribe(status=>{if(status==='SUBSCRIBED')queueStaffUpdate()});
+  }catch(e){console.warn('التحديث المباشر غير متاح؛ سيستمر التحديث الدوري.',e)}
  }
  function render(){
   let tabs=profile.role==='parent'?[['new','طلب جديد'],['orders','تذاكري']]:profile.role==='canteen'?[['work','طلبات المقصف']]:[['work','الطلبات'],['manage','الأصناف'],['settings','الإعدادات']];
@@ -46,7 +84,16 @@
   ${selected?`<div class="checkout-bar"><div class="checkout-inner"><span>الأصناف المختارة: ${num(selected)}</span><button type="button" data-act="checkout" ${!children.length?'disabled':''}>مراجعة الطلب</button></div></div>`:''}</div>`;
  }
  function orderCard(o,staff){let items=(o.items||[]).map(i=>`${num(i.qty)} × ${esc(i.name)}`).join('، ');return `<div class="card ticket"><div class="between"><strong>${esc(o.child_name)}</strong><span class="badge ${o.status==='cancelled'?'warn':''}">${status[o.status]||''}</span></div><p>الصف ${grades[o.grade-1]} · الشعبة ${num(o.section)} · ${esc(o.day)}</p><p>${items}</p><div class="between"><b class="ticket-code">رمز الاستلام: ${esc(o.code)}</b><span class="money">${money(o.amount)}</span></div>${staff&&o.status!=='cancelled'?`<div class="actions"><button data-act="delivery" data-id="${o.id}" data-value="${o.status==='delivered'?'false':'true'}" class="${o.status==='delivered'?'outline':''}">${o.status==='delivered'?'إلغاء التسليم':'تم التسليم'}</button></div>`:!staff&&o.status==='active'&&o.day>today()?`<div class="actions"><button class="danger" data-act="cancel" data-id="${o.id}">إلغاء هذا اليوم واسترداد رصيده</button></div>`:''}</div>`}
- function renderOrders(staff){let list=orders;if(staff)list=list.filter(o=>o.day===filterDate&&(o.child_name.includes(filterText)||o.code.includes(filterText)));$('#content').innerHTML=staff?`<div class="card"><div class="grid"><label>تاريخ الطلبات<input type="date" id="filterDate" value="${filterDate}"></label><label>البحث بالاسم أو الرمز<input type="search" id="filterText" value="${esc(filterText)}"></label></div><p>عدد الطلبات المعروضة: ${num(list.length)}</p></div>`:'';$('#content').innerHTML+=list.length?list.map(o=>orderCard(o,staff)).join(''):'<div class="card empty">لا توجد طلبات للعرض.</div>';}
+ function renderStaffList(){
+  const target=$('#staffOrders'),count=$('#staffCount');if(!target||!count)return;
+  const list=orders.filter(o=>o.day===filterDate&&(o.child_name.includes(filterText)||o.code.includes(filterText)));
+  count.textContent=num(list.length);
+  target.innerHTML=list.length?list.map(o=>orderCard(o,true)).join(''):'<div class="card empty">لا توجد طلبات للعرض.</div>';
+ }
+ function renderOrders(staff){
+  if(staff){$('#content').innerHTML=`<div class="card"><div class="grid"><label>تاريخ الطلبات<input type="date" id="filterDate" value="${filterDate}"></label><label>البحث بالاسم أو الرمز<input type="search" id="filterText" value="${esc(filterText)}"></label></div><p>عدد الطلبات المعروضة: <span id="staffCount"></span></p><p class="small" id="liveStatus" role="status">تحديث الطلبات تلقائيًا</p></div><div id="staffOrders"></div>`;renderStaffList();}
+  else $('#content').innerHTML=orders.length?orders.map(o=>orderCard(o,false)).join(''):'<div class="card empty">لا توجد طلبات للعرض.</div>';
+ }
  function renderChildren(){$('#content').innerHTML=`<div class="card"><div class="between"><h2>أبنائي</h2><button data-act="child">إضافة طالب</button></div>${children.length?children.map(c=>`<div class="item"><div><b>${esc(c.name)}</b><div class="muted">الصف ${grades[c.grade-1]} · شعبة ${num(c.section)}</div></div><div class="actions"><button class="outline smallbtn" data-act="edit-child" data-id="${c.id}">تعديل</button><button class="danger smallbtn" data-act="delete-child" data-id="${c.id}">حذف</button></div></div>`).join(''):'<div class="empty">لم تضف طلابًا بعد.</div>'}</div>`;}
  function renderManage(){$('#content').innerHTML=`<div class="card"><div class="between"><h2>إدارة الأصناف</h2><button data-act="item">إضافة صنف</button></div>${menu.map(m=>`<div class="item"><div><b>${esc(m.name)}</b><div class="muted">${esc(m.category)} · ${money(m.price)} · ${m.available?'متاح':'غير متاح'}</div></div><div class="actions"><button class="outline smallbtn" data-act="edit-item" data-id="${m.id}">تعديل</button><button class="outline smallbtn" data-act="toggle-item" data-id="${m.id}">${m.available?'إيقاف':'إتاحة'}</button></div></div>`).join('')}</div>`;}
  function renderSettings(){$('#content').innerHTML=`<div class="card"><h2>إعدادات المدرسة والاشتراكات</h2><form id="settingsForm"><label>اسم المدرسة<input name="school" maxlength="60" value="${esc(settings.school)}"></label><label>خصم الأسبوع ٪<input name="week" type="number" min="0" max="50" required value="${settings.week_discount}"></label><label>خصم ٢٠ يومًا ٪<input name="month" type="number" min="0" max="50" required value="${settings.month_discount}"></label><button>حفظ الإعدادات</button></form><p class="small">إدارة الحسابات ومنح الأدوار تتم حاليًا من لوحة قاعدة البيانات بحسب دليل التشغيل.</p></div>`;}
@@ -75,12 +122,14 @@
  case 'settingsForm':check(await db.from('settings').update({school:String(x.get('school')).trim(),week_discount:Number(x.get('week')),month_discount:Number(x.get('month'))}).eq('id',1));await load();toast('حُفظت الإعدادات');break;}}
  document.addEventListener('click',async e=>{const b=e.target.closest('button');if(!b)return;try{clearError();if(b.dataset.tab){view=b.dataset.tab;render();return}if(b.dataset.act){b.disabled=true;try{await action(b)}finally{b.disabled=false}}}catch(err){appError(err)}});
  document.addEventListener('submit',async e=>{e.preventDefault();const b=e.target.querySelector('button[type=submit],button:not([type])');try{clearError();if(b)b.disabled=true;await submit(e.target)}catch(err){appError(err)}finally{if(b)b.disabled=false}});
- document.addEventListener('change',e=>{if(e.target.id==='child')selectedChild=e.target.value;if(e.target.id==='plan')selectedPlan=e.target.value;if(e.target.id==='start')selectedStart=e.target.value;if(e.target.id==='filterDate'){filterDate=e.target.value;renderOrders(true)}});
- document.addEventListener('input',e=>{if(e.target.id==='filterText'){filterText=e.target.value;const pos=e.target.selectionStart;renderOrders(true);$('#filterText').focus();$('#filterText').setSelectionRange(pos,pos)}});
+ document.addEventListener('change',e=>{if(e.target.id==='child')selectedChild=e.target.value;if(e.target.id==='plan')selectedPlan=e.target.value;if(e.target.id==='start')selectedStart=e.target.value;if(e.target.id==='filterDate'){filterDate=e.target.value;renderStaffList()}});
+ document.addEventListener('input',e=>{if(e.target.id==='filterText'){filterText=e.target.value;renderStaffList()}});
+ document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshStaffOrders()});
  $('#signup').addEventListener('click',async()=>{try{clearError();const form=$('#loginForm');if(!form.reportValidity())return;const data=new FormData(form);const result=check(await db.auth.signUp({email:String(data.get('email')).trim(),password:data.get('password'),options:{emailRedirectTo:location.origin+location.pathname}}));toast(result.session?'تم إنشاء الحساب':'تحقق من بريدك لتأكيد الحساب، ثم سجّل الدخول.')}catch(e){appError(e)}});
  $('#logout').addEventListener('click',async()=>{try{check(await db.auth.signOut());user=null;cart={};show('auth')}catch(e){appError(e)}});
  $('#refresh').addEventListener('click',()=>load().then(()=>toast('تم التحديث')).catch(appError));
  if(!config.SUPABASE_URL||!config.SUPABASE_ANON_KEY){show('setup');return}if(!window.supabase){fail(Error('تعذر تحميل مكتبة الاتصال. تحقق من الإنترنت وأعد فتح الصفحة.'));show('setup');return}
- try{db=window.supabase.createClient(config.SUPABASE_URL,config.SUPABASE_ANON_KEY);db.auth.onAuthStateChange((_event,session)=>{user=session?.user||null;if(user)setTimeout(()=>load().catch(appError),0);else show('auth')})}catch(e){fail(e);show('setup')}
+ try{db=window.supabase.createClient(config.SUPABASE_URL,config.SUPABASE_ANON_KEY);db.auth.onAuthStateChange((_event,session)=>{const next=session?.user||null;if(liveOwner&&(!next||next.id!==liveOwner))stopStaffUpdates();user=next;if(user)setTimeout(()=>load().catch(appError),0);else{profile=null;orders=[];show('auth')}})}catch(e){fail(e);show('setup')}
 })();
+
 
